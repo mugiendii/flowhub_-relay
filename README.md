@@ -131,3 +131,4 @@ reads LOW, the fault is downstream of the MCU — driver board, relay, wiring.
 has a live broker password committed in both `relay.py` and its unit file;
 don't repeat that here. Set it with `systemctl edit mqtt_relay_points`, and
 rotate the shared one when you get the chance.
+# flowhub_-relay
