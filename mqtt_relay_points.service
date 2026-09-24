@@ -1,0 +1,41 @@
+[Unit]
+Description=MQTT/WebSocket relay for point-map firmware
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mugiendii
+WorkingDirectory=/home/mugiendii/mqtt_relay_points
+ExecStart=/home/mugiendii/mqtt_relay_points/.venv/bin/python3 relay.py
+Restart=always
+RestartSec=5
+
+Environment=MQTT_HOST=157.173.107.18
+Environment=MQTT_PORT=1883
+Environment=MQTT_USERNAME=admin
+# Set this out of band, not here. systemd unit files are world-readable by
+# default, and this one ends up in git.
+#   systemctl edit mqtt_relay_points   ->   [Service] Environment=MQTT_PASSWORD=...
+Environment=MQTT_PASSWORD=
+Environment=MQTT_CLIENT_ID=points_web_relay
+
+Environment=MQTT_TOPIC_STATUS=oceo2/status
+Environment=MQTT_TOPIC_POINTS=oceo2/points
+Environment=MQTT_TOPIC_CMD=oceo2/cmd
+Environment=MQTT_TOPIC_CFG=oceo2/cfg
+
+# 127.0.0.1 like the sibling relays. Reach it over an SSH tunnel or a reverse
+# proxy; only set 0.0.0.0 once you have decided how it should be exposed.
+Environment=WS_HOST=127.0.0.1
+Environment=WS_PORT=8767
+
+Environment=SQLITE_PATH=/home/mugiendii/mqtt_relay_points/events.db
+Environment=STALE_AFTER_S=15
+
+# Only for a device still running HmiPoints.cpp firmware. Leave empty and the
+# relay refuses commands until the device reports what it drives.
+Environment=LEGACY_OUTPUT_POINTS=
+
+[Install]
+WantedBy=multi-user.target
