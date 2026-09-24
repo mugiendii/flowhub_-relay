@@ -75,6 +75,11 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "events.db")
 # offline rather than showing stale numbers as if they were live.
 STALE_AFTER_S = float(os.environ.get("STALE_AFTER_S", "15"))
 
+# A traced payload is clipped so one oversized retained message cannot push a
+# browser's log buffer out of the way. The browser is told when this happened
+# rather than shown a silently shortened payload.
+MAX_TRACE_CHARS = int(os.environ.get("MAX_TRACE_CHARS", "512"))
+
 # Commands the browser may push straight through to the device. Everything else
 # is dropped -- this relay forwards configuration, it does not invent it.
 FORWARDABLE_COMMANDS = {"SET_POINTS", "SET_RULES", "SET_NET", "GET_NET", "GET_POINTS", "SAVE"}
@@ -122,6 +127,31 @@ async def log_event(data_id: int, payload: str) -> None:
         )
     except Exception:
         log.exception("Failed to write event row")
+
+
+def trace(direction: str, topic: str, payload: str) -> None:
+    """Mirrors one MQTT message to every browser, as it appeared on the wire.
+
+    Separate from the state broadcast on purpose. That one carries the relay's
+    INTERPRETATION -- parsed, merged, with `online` and a timestamp bolted on.
+    This carries the message, including the ones the interpretation throws
+    away: a payload that would not parse, a 3003 command confirmation, a topic
+    nothing handles. Those are exactly the messages worth seeing when the
+    question is "is the device actually publishing?".
+    """
+    if loop is None or not clients:
+        return
+    asyncio.run_coroutine_threadsafe(
+        broadcast({
+            "type": "MQTT",
+            "dir": direction,          # "in" = from the broker, "out" = published
+            "topic": topic,
+            "payload": payload[:MAX_TRACE_CHARS],
+            "truncated": len(payload) > MAX_TRACE_CHARS,
+            "ts": time.time(),
+        }),
+        loop,
+    )
 
 
 async def broadcast(message: dict) -> None:
@@ -175,6 +205,10 @@ def on_disconnect(client, userdata, rc):
 def on_message(client, userdata, msg):
     global latest_state, last_message_at
     raw = msg.payload.decode(errors="replace")
+    # Traced BEFORE parsing, so a malformed payload still reaches the browser.
+    # A payload that does not parse is the single most useful thing to see
+    # here, and it is the one the old path dropped silently.
+    trace("in", msg.topic, raw)
     try:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
@@ -265,6 +299,7 @@ async def handle_command(msg: dict, ws) -> None:
     await log_event(2002, payload)
     log.info("Command -> %s: %s", MQTT_TOPIC_CMD, payload)
     mqtt_client.publish(MQTT_TOPIC_CMD, payload, qos=1)
+    trace("out", MQTT_TOPIC_CMD, payload)
 
 
 async def handle_config(msg: dict, ws) -> None:
@@ -281,6 +316,7 @@ async def handle_config(msg: dict, ws) -> None:
     await log_event(2003, payload)
     log.info("Config -> %s: %s (%d bytes)", MQTT_TOPIC_CFG, cmd, len(payload))
     mqtt_client.publish(MQTT_TOPIC_CFG, payload, qos=1)
+    trace("out", MQTT_TOPIC_CFG, payload)
     await ws.send(json.dumps({"type": "FORWARDED", "cmd": cmd}))
 
 
