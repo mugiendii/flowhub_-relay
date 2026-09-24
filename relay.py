@@ -107,6 +107,10 @@ CREATE INDEX IF NOT EXISTS events_data_id_idx ON events (data_id);
 clients: set = set()
 latest_state: dict | None = None
 capability: dict | None = None      # the device's own point list
+# The capability exactly as it arrived, kept for the wire-log replay. The
+# parsed dict above is what the relay REASONS with; this is what was on the
+# wire, and a wire log that shows anything else is not a wire log.
+capability_raw: str | None = None
 writable_points: set[str] = set(LEGACY_OUTPUT_POINTS)
 last_message_at: float = 0.0
 loop: asyncio.AbstractEventLoop | None = None
@@ -129,6 +133,19 @@ async def log_event(data_id: int, payload: str) -> None:
         log.exception("Failed to write event row")
 
 
+def trace_envelope(direction: str, topic: str, payload: str,
+                   retained: bool = False) -> dict:
+    return {
+        "type": "MQTT",
+        "dir": direction,          # "in" = from the broker, "out" = published
+        "topic": topic,
+        "payload": payload[:MAX_TRACE_CHARS],
+        "truncated": len(payload) > MAX_TRACE_CHARS,
+        "retained": retained,
+        "ts": time.time(),
+    }
+
+
 def trace(direction: str, topic: str, payload: str) -> None:
     """Mirrors one MQTT message to every browser, as it appeared on the wire.
 
@@ -142,15 +159,7 @@ def trace(direction: str, topic: str, payload: str) -> None:
     if loop is None or not clients:
         return
     asyncio.run_coroutine_threadsafe(
-        broadcast({
-            "type": "MQTT",
-            "dir": direction,          # "in" = from the broker, "out" = published
-            "topic": topic,
-            "payload": payload[:MAX_TRACE_CHARS],
-            "truncated": len(payload) > MAX_TRACE_CHARS,
-            "ts": time.time(),
-        }),
-        loop,
+        broadcast(trace_envelope(direction, topic, payload)), loop
     )
 
 
@@ -161,10 +170,10 @@ async def broadcast(message: dict) -> None:
     await asyncio.gather(*(c.send(data) for c in list(clients)), return_exceptions=True)
 
 
-def adopt_capability(parsed: dict) -> None:
+def adopt_capability(parsed: dict, raw: str | None = None) -> None:
     """Learns the device's point list. This is the whole difference from the
     oceo relay: what is writable comes from the device, not from a constant."""
-    global capability, writable_points
+    global capability, capability_raw, writable_points
     points = parsed.get("points")
     if not isinstance(points, list):
         log.warning("Capability report has no points array, ignoring")
@@ -184,6 +193,7 @@ def adopt_capability(parsed: dict) -> None:
             writable.add(pid)
 
     capability = parsed
+    capability_raw = raw
     writable_points = writable
     log.info("Capability: %d points, writable: %s", len(names), sorted(writable) or "none")
 
@@ -218,7 +228,7 @@ def on_message(client, userdata, msg):
         return
 
     if msg.topic == MQTT_TOPIC_POINTS:
-        adopt_capability(parsed)
+        adopt_capability(parsed, raw)
         if loop is not None:
             asyncio.run_coroutine_threadsafe(log_event(4004, raw), loop)
             asyncio.run_coroutine_threadsafe(
@@ -327,6 +337,10 @@ async def handle_client(websocket, _path=None):
         # Send what we already know, so a page that just loaded is not blank
         # until the next publish interval.
         if capability is not None:
+            await websocket.send(json.dumps(trace_envelope(
+                "in", MQTT_TOPIC_POINTS,
+                capability_raw if capability_raw is not None else json.dumps(capability),
+                retained=True)))
             await websocket.send(json.dumps({"type": "CAPABILITY", **capability}))
         if latest_state is not None:
             await websocket.send(json.dumps(latest_state))
